@@ -39,6 +39,17 @@ def infer_miss_align(
         help="Run cross-correlation based alignment before the inference "
         "iterations. This performs coarse alignment.",
     ),
+    prune_low_fov: bool = typer.Option(
+        False,
+        help="During preprocessing, mark views whose field-of-view fraction "
+        "falls below --min-fov-fraction as unused and re-run cross-correlation "
+        "on the survivors. Requires --preprocess.",
+    ),
+    min_fov_fraction: float = typer.Option(
+        0.8,
+        help="Minimum field-of-view fraction a view must retain to be kept when "
+        "--prune-low-fov is set (default: 0.8).",
+    ),
 ) -> None:
     """Align a dataset by applying models from a previous training run.
 
@@ -95,6 +106,11 @@ def infer_miss_align(
             devices=devices_alignment,
         )
 
+    if prune_low_fov and not preprocess:
+        raise ValueError("--prune-low-fov requires --preprocess.")
+    if prune_low_fov and not (0.0 < min_fov_fraction <= 1.0):
+        raise ValueError("--min-fov-fraction must be in the range (0, 1].")
+
     # Run preprocessing if requested
     if preprocess:
         if start_at_iteration != 0:
@@ -112,6 +128,8 @@ def infer_miss_align(
         run_cross_correlation_alignment_parallel(
             training_directory=data_directory,
             devices=devices_alignment,
+            prune_low_fov=prune_low_fov,
+            min_fov_fraction=min_fov_fraction,
         )
 
     start_iter = start_at_iteration

@@ -141,3 +141,32 @@ def test_infer_missing_model_raises_before_alignment(tmp_path, monkeypatch):
 
     # validation happens up front, before any alignment work
     assert called == []
+
+
+def test_infer_prune_low_fov_requires_preprocess(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "ts1.xml").write_text("xml1")
+
+    model_run_dir = tmp_path / "run"
+    iteration_settings = [{"downsample": 1, "alignment": "global"}]
+    _make_models(model_run_dir, 1)
+    config_path = _write_config(tmp_path, data_dir, model_run_dir, iteration_settings)
+
+    called = []
+    monkeypatch.setattr(
+        infer_module,
+        "run_alignment_parallel",
+        lambda **kwargs: called.append(kwargs),
+    )
+
+    with pytest.raises(ValueError, match="--prune-low-fov requires --preprocess"):
+        infer_miss_align(
+            config_file=config_path,
+            start_at_iteration=0,
+            prepare_stacks=None,
+            preprocess=False,
+            prune_low_fov=True,
+        )
+
+    assert called == []
