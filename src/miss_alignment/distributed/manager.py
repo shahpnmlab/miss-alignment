@@ -147,6 +147,8 @@ def run_distributed(
     task_type: str = "alignment",
     desired_pixel_size: float | None = None,
     lowpass_cutoff: float | None = None,
+    prune_low_fov: bool = False,
+    min_fov_fraction: float = 0.8,
 ) -> dict[str, float]:
     """Write tasks, provision workers, block until all tasks are terminal.
 
@@ -197,6 +199,8 @@ def run_distributed(
             task_type=task_type,
             desired_pixel_size=desired_pixel_size,
             lowpass_cutoff=lowpass_cutoff,
+            prune_low_fov=prune_low_fov,
+            min_fov_fraction=min_fov_fraction,
         )
         write_pending(layout, spec)
 

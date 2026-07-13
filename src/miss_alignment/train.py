@@ -318,6 +318,17 @@ def train_miss_align(
         "and MISS_CLUSTER_SCRIPT environment variables to be set. "
         "When absent, local multi-GPU mode is used.",
     ),
+    prune_low_fov: bool = typer.Option(
+        False,
+        help="During preprocessing, mark views whose field-of-view fraction "
+        "falls below --min-fov-fraction as unused and re-run cross-correlation "
+        "on the survivors. Requires --preprocess.",
+    ),
+    min_fov_fraction: float = typer.Option(
+        0.8,
+        help="Minimum field-of-view fraction a view must retain to be kept when "
+        "--prune-low-fov is set (default: 0.8).",
+    ),
 ) -> None:
     """Iteratively train and realign a dataset over a series of coarse-to-fine
     macro-iterations.
@@ -398,6 +409,20 @@ def train_miss_align(
             n_cluster_workers=n_cluster_workers,
         )
 
+    # typer only resolves Option defaults when the command is invoked through
+    # the CLI; a direct Python call leaves the OptionInfo sentinel in place, and
+    # that sentinel is truthy. Fall back to the documented defaults so callers
+    # that omit these arguments are not treated as having enabled pruning.
+    if not isinstance(prune_low_fov, bool):
+        prune_low_fov = False
+    if not isinstance(min_fov_fraction, float):
+        min_fov_fraction = 0.8
+
+    if prune_low_fov and not preprocess:
+        raise ValueError("--prune-low-fov requires --preprocess.")
+    if prune_low_fov and not (0.0 < min_fov_fraction <= 1.0):
+        raise ValueError("--min-fov-fraction must be in the range (0, 1].")
+
     # Run preprocessing if requested
     if preprocess:
         if start_at_iteration != 0:
@@ -420,6 +445,8 @@ def train_miss_align(
                 training_directory=training_directory,
                 devices=devices_alignment,
                 n_cluster_workers=n_cluster_workers,
+                prune_low_fov=prune_low_fov,
+                min_fov_fraction=min_fov_fraction,
             )
 
     exclude_nonfinite_alignment_tilt_series(training_directory)

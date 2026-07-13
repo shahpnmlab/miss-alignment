@@ -24,7 +24,7 @@ import typer
 from ..alignment.tilt_series import evaluate_tilt_series
 from ..models.models import MissAlignment
 from ..prepare_stacks import _prepare_single_tilt_series
-from ..preprocessing import _run_cross_correlation_single
+from ..preprocessing import _DROPPED_VIEWS_DIRNAME, _run_cross_correlation_single
 from .queue import (
     QueueLayout,
     TaskSpec,
@@ -128,10 +128,18 @@ def _execute_task(
         return 0.0
 
     elif spec.task_type == "cross_correlation":
+        report_dir = (
+            Path(spec.output_directory) / _DROPPED_VIEWS_DIRNAME
+            if spec.prune_low_fov
+            else None
+        )
         _run_cross_correlation_single(
             xml_file=Path(spec.tilt_series_path),
             device=_device_int(device),
             lowpass_cutoff=spec.lowpass_cutoff or 0.25,
+            prune_low_fov=spec.prune_low_fov,
+            min_fov_fraction=spec.min_fov_fraction,
+            report_dir=report_dir,
         )
         return 0.0
 

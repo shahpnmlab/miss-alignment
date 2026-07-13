@@ -84,6 +84,9 @@ class TaskSpec:
     task_type: str = "alignment"
     desired_pixel_size: float | None = None
     lowpass_cutoff: float | None = None
+    # Field-of-view pruning parameters (cross_correlation tasks only).
+    prune_low_fov: bool = False
+    min_fov_fraction: float = 0.8
 
 
 def _atomic_write(path: Path, data: dict) -> None:
