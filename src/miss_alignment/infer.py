@@ -106,6 +106,15 @@ def infer_miss_align(
             devices=devices_alignment,
         )
 
+    # typer only resolves Option defaults when the command is invoked through
+    # the CLI; a direct Python call leaves the OptionInfo sentinel in place, and
+    # that sentinel is truthy. Fall back to the documented defaults so callers
+    # that omit these arguments are not treated as having enabled pruning.
+    if not isinstance(prune_low_fov, bool):
+        prune_low_fov = False
+    if not isinstance(min_fov_fraction, float):
+        min_fov_fraction = 0.8
+
     if prune_low_fov and not preprocess:
         raise ValueError("--prune-low-fov requires --preprocess.")
     if prune_low_fov and not (0.0 < min_fov_fraction <= 1.0):
