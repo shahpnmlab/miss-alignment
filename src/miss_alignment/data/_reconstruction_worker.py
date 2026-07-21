@@ -94,6 +94,16 @@ class TiltSeriesFetcher:
         return self._tilt_series, self._images, self._pixel_size
 
 
+def _triplet_is_finite(triplet: list[tuple[torch.Tensor, int]]) -> bool:
+    """True when every volume in a triplet is free of NaN/inf.
+
+    A single non-finite voxel makes the volume's mean and std non-finite, which
+    turns the whole volume into NaN during normalization and propagates into the
+    loss, so such triplets must never reach the pool.
+    """
+    return all(torch.isfinite(vol).all() for vol, _ in triplet)
+
+
 def _count_partition_files(pool_dir: Path, partition_id: int) -> int:
     """Count the number of files in a partition.
 
@@ -176,6 +186,8 @@ def reconstruction_worker(
 
     # Sequential ID counter for this worker (unique per worker)
     sequential_id = 0
+    # Number of triplets dropped for containing non-finite values
+    n_discarded = 0
     # Stagger starting partition by worker_id to avoid all workers
     # competing for the same partitions at startup
     current_partition = worker_id % n_partitions
@@ -197,6 +209,21 @@ def reconstruction_worker(
 
         # Write each triplet to a separate file
         for triplet in triplets:
+            # Convert to fp16 for storage. Done before waiting for a partition
+            # slot so an unusable triplet is dropped without blocking on one.
+            triplet_fp16 = [(vol.half(), label) for vol, label in triplet]
+
+            # Guard against non-finite values, either from the reconstruction
+            # itself or from overflowing fp16 range on the cast above.
+            if not _triplet_is_finite(triplet_fp16):
+                n_discarded += 1
+                logger.warning(
+                    f"Reconstruction worker {worker_id} discarded a triplet "
+                    f"containing non-finite values "
+                    f"({n_discarded} discarded so far)."
+                )
+                continue
+
             # Check the target partition before each write so every
             # partition is individually guarded regardless of n_partitions
             partitions_checked = 0
@@ -212,9 +239,6 @@ def reconstruction_worker(
                         return
                     time.sleep(PAUSE_POLL_INTERVAL)
                     partitions_checked = 0
-
-            # Convert to fp16 for storage
-            triplet_fp16 = [(vol.half(), label) for vol, label in triplet]
 
             # Write with atomic rename
             # File name includes worker_id for uniqueness across workers

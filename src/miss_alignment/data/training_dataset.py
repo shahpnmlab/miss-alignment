@@ -1,3 +1,4 @@
+import logging
 import time
 import random
 import pickle
@@ -12,6 +13,8 @@ from ._augmentation import (
     random_edge_mask,
     random_cube_mask,
 )
+
+logger = logging.getLogger(__name__)
 
 # pause polling interval in seconds
 PAUSE_POLL_INTERVAL = 0.05  # 50ms
@@ -143,4 +146,16 @@ class ReconstructionPoolDataset(Dataset):
 
     def _normalize(self, volume: torch.Tensor) -> torch.Tensor:
         mean, std = torch.mean(volume), torch.std(volume)
+        if not (torch.isfinite(mean) and torch.isfinite(std)):
+            # A single non-finite voxel makes mean/std non-finite, which would
+            # turn the entire volume into NaN and propagate into the loss. The
+            # reconstruction worker already drops such volumes before they
+            # reach the pool; this is a backstop so one bad patch cannot kill a
+            # training run.
+            logger.warning(
+                "Non-finite values in a training volume; sanitizing before "
+                "normalization."
+            )
+            volume = torch.nan_to_num(volume, nan=0.0, posinf=0.0, neginf=0.0)
+            mean, std = torch.mean(volume), torch.std(volume)
         return (volume - mean) / std.clamp(min=1e-6)
