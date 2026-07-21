@@ -17,6 +17,7 @@ from miss_alignment.data._reconstruction_worker import (
     _create_pool_reconstruction,
     _generate_translations,
     _count_partition_files,
+    _triplet_is_finite,
     reconstruction_worker,
     TiltSeriesFetcher,
     sample_positions,
@@ -777,3 +778,28 @@ class TestReconstructionWorker:
 
         ids.sort()
         assert ids == list(range(12))
+
+
+class TestTripletIsFinite:
+    """The pool writer must never store a triplet containing NaN/inf, since a
+    single non-finite voxel turns the volume into NaN during normalization."""
+
+    def _triplet(self, volumes):
+        return [(v, label) for v, label in zip(volumes, [1, -1, 1])]
+
+    def test_all_finite_triplet_accepted(self):
+        volumes = [torch.randn(4, 4, 4).half() for _ in range(3)]
+        assert _triplet_is_finite(self._triplet(volumes)) is True
+
+    @pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_triplet_rejected(self, bad_value):
+        volumes = [torch.randn(4, 4, 4).half() for _ in range(3)]
+        volumes[1][0, 0, 0] = bad_value
+        assert _triplet_is_finite(self._triplet(volumes)) is False
+
+    def test_fp16_overflow_on_cast_is_rejected(self):
+        """Values beyond fp16 range become inf on .half() and must be caught."""
+        volumes = [torch.randn(4, 4, 4) for _ in range(3)]
+        volumes[2][1, 1, 1] = 1e6  # finite in fp32, inf once cast to fp16
+        triplet_fp16 = self._triplet([v.half() for v in volumes])
+        assert _triplet_is_finite(triplet_fp16) is False

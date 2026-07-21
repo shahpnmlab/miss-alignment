@@ -182,6 +182,14 @@ class TestReconstructionPoolDataset:
         result = dataset._normalize(volume)
         assert torch.all(torch.isfinite(result))
 
+    @pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), float("-inf")])
+    def test_normalize_non_finite_input_stays_finite(self, dataset, bad_value):
+        """A single non-finite voxel must not turn the whole volume into NaN."""
+        volume = torch.arange(10, dtype=torch.float32)
+        volume[3] = bad_value
+        result = dataset._normalize(volume)
+        assert torch.all(torch.isfinite(result))
+
     @patch("miss_alignment.data.training_dataset.random_contrast")
     @patch("miss_alignment.data.training_dataset.random_edge_mask")
     @patch("miss_alignment.data.training_dataset.random_cube_mask")
