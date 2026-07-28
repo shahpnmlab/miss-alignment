@@ -48,14 +48,21 @@ Caveats
 Example
 -------
     python examples/calibrate_alignment_score.py \\
+        --config-file config.yaml \\
         --model-checkpoint run/iter3/model.ckpt \\
-        --tilt-series 'tiltseries/*.xml' \\
         --output-directory calibration/ \\
         --device cuda:0
+
+The tilt-series directory, patch size, patch overlap, batch size, CTF setting
+and seed are all read from the same config that drove the run, so they cannot
+silently disagree with it. The downsample factor is taken from the matching
+entry of ``iteration_settings``, inferred from the ``iterN`` directory of the
+checkpoint (override with ``--iteration``).
 """
 
 import json
 import math
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -63,6 +70,7 @@ import einops
 import numpy as np
 import torch
 import typer
+import yaml
 from scipy.optimize import curve_fit
 from warpylib.tilt_series.reconstruct_volume import preprocess_tilt_data
 
@@ -74,6 +82,67 @@ from miss_alignment.models import MissAlignment
 # The small values are what constrain the residual error; the large ones pin
 # down the slope.
 DEFAULT_DELTA_STEPS_PIXELS = (0.0, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0)
+
+
+def _infer_iteration(model_checkpoint: Path) -> Optional[int]:
+    """Recover the 1-based iteration index from a ``.../iterN/model.ckpt`` path."""
+    match = re.fullmatch(r"iter(\d+)", model_checkpoint.parent.name)
+    return int(match.group(1)) if match else None
+
+
+def resolve_settings(
+    config_file: Path, model_checkpoint: Path, iteration: Optional[int]
+) -> dict:
+    """Read every alignment-relevant setting out of the run's own config.
+
+    Both the training and inference config schemas are accepted; they differ
+    only in whether the tilt-series live under ``general.training_directory``
+    or ``general.data_directory``.
+    """
+    with open(config_file, "r") as f:
+        config = yaml.safe_load(f)
+
+    general = config["general"]
+    alignment = config["tilt_series_alignment"]
+
+    if "training_directory" in general:
+        data_directory = Path(general["training_directory"])
+    elif "data_directory" in general:
+        data_directory = Path(general["data_directory"])
+    else:
+        raise typer.BadParameter(
+            f"{config_file} has neither 'general.training_directory' nor "
+            "'general.data_directory'."
+        )
+
+    iteration_settings = general["iteration_settings"]
+    if iteration is None:
+        iteration = _infer_iteration(model_checkpoint)
+    if iteration is None:
+        # Checkpoint is not in an iterN directory; the last iteration is the
+        # only defensible guess, but say so rather than silently picking it.
+        iteration = len(iteration_settings)
+        print(
+            f"  note: could not infer the iteration from "
+            f"{model_checkpoint.parent.name}/, assuming the last "
+            f"({iteration}). Pass --iteration to be explicit."
+        )
+    if not 1 <= iteration <= len(iteration_settings):
+        raise typer.BadParameter(
+            f"--iteration {iteration} is outside the {len(iteration_settings)} "
+            f"iterations defined in {config_file}."
+        )
+
+    return {
+        "data_directory": data_directory,
+        "iteration": iteration,
+        "downsample": iteration_settings[iteration - 1]["downsample"],
+        "apply_ctf": bool(general["apply_ctf"]),
+        "seed": int(general.get("seed", 42)),
+        "patch_size": int(alignment["patch_size"]),
+        "patch_overlap": float(alignment["patch_overlap"]),
+        "batch_size": int(alignment["batch_size"]),
+    }
 
 
 def load_model(model_checkpoint: Path, device: str) -> MissAlignment:
@@ -383,23 +452,28 @@ def plot_curves(results: list[dict], output_path: Path) -> None:
 
 
 def main(
+    config_file: Path = typer.Option(
+        ...,
+        help="The YAML config that drove the run. Supplies the tilt-series "
+        "directory, patch size/overlap, batch size, CTF setting, seed and the "
+        "per-iteration downsample.",
+    ),
     model_checkpoint: Path = typer.Option(
         ..., help="Path to a trained model checkpoint (e.g. run/iter3/model.ckpt)."
-    ),
-    tilt_series: str = typer.Option(
-        ...,
-        help="Glob for tilt-series XML files, e.g. 'tiltseries/*.xml'. "
-        "Quote it so the shell does not expand it.",
     ),
     output_directory: Path = typer.Option(
         Path("calibration"), help="Directory for the JSON report and plot."
     ),
-    patch_size: int = typer.Option(96, help="Match tilt_series_alignment.patch_size."),
-    patch_overlap: float = typer.Option(0.1, help="Match the alignment config."),
-    batch_size: int = typer.Option(32, help="Patches reconstructed simultaneously."),
-    apply_ctf: bool = typer.Option(False, help="Match general.apply_ctf."),
-    downsample: int = typer.Option(
-        1, help="Match the downsample of the iteration being calibrated."
+    iteration: Optional[int] = typer.Option(
+        None,
+        help="1-based iteration whose settings to use. Inferred from the "
+        "'iterN' directory of the checkpoint when not given.",
+    ),
+    tilt_series: Optional[str] = typer.Option(
+        None,
+        help="Optional glob overriding which XML files to calibrate, e.g. "
+        "'tiltseries/iter3/*.xml' to score an earlier snapshot. Defaults to the "
+        "config's tilt-series directory. Quote it so the shell does not expand it.",
     ),
     device: str = typer.Option("cuda:0", help="Device to run on."),
     max_positions: int = typer.Option(
@@ -415,16 +489,26 @@ def main(
         help="Override the largest injected shift, in pixels of the "
         "(downsampled) stack. Default sweeps up to 3 pixels.",
     ),
-    seed: int = typer.Option(42, help="Seed for positions and injected noise."),
 ) -> None:
     """Calibrate the alignment score against physical misalignment in Angstroms."""
-    xml_files = sorted(Path().glob(tilt_series))
-    if not xml_files:
-        # also accept an absolute-path glob
+    settings = resolve_settings(config_file, model_checkpoint, iteration)
+
+    if tilt_series is not None:
         pattern = Path(tilt_series)
-        xml_files = sorted(pattern.parent.glob(pattern.name))
+        xml_files = sorted(Path().glob(tilt_series))
+        if not xml_files:
+            # also accept an absolute-path glob
+            xml_files = sorted(pattern.parent.glob(pattern.name))
+        source = tilt_series
+    else:
+        # Top-level XMLs only: the iterN/ snapshots and pre-iter/ backup are
+        # deliberately excluded, since the current alignment is what you would
+        # threshold on.
+        xml_files = sorted(settings["data_directory"].glob("*.xml"))
+        source = str(settings["data_directory"])
+
     if not xml_files:
-        raise typer.BadParameter(f"No XML files matched: {tilt_series}")
+        raise typer.BadParameter(f"No tilt-series XML files found in: {source}")
 
     output_directory.mkdir(parents=True, exist_ok=True)
 
@@ -438,6 +522,15 @@ def main(
     model = load_model(model_checkpoint, device)
 
     print(f"\nCalibrating {len(xml_files)} tilt-series against {model_checkpoint}")
+    print(f"  tilt-series from:  {source}")
+    print(
+        f"  iteration {settings['iteration']} settings: "
+        f"downsample={settings['downsample']}, "
+        f"patch_size={settings['patch_size']}, "
+        f"patch_overlap={settings['patch_overlap']}, "
+        f"batch_size={settings['batch_size']}, "
+        f"apply_ctf={settings['apply_ctf']}"
+    )
     print(f"  injected shifts (pixels): {', '.join(f'{d:g}' for d in delta_steps)}")
     print(f"  {max_positions} positions x {n_repeats} repeats per shift\n")
 
@@ -447,23 +540,36 @@ def main(
         result = calibrate_one(
             model=model,
             xml_path=xml_path,
-            patch_size=patch_size,
-            patch_overlap=patch_overlap,
-            batch_size=batch_size,
-            apply_ctf=apply_ctf,
-            downsample=downsample,
+            patch_size=settings["patch_size"],
+            patch_overlap=settings["patch_overlap"],
+            batch_size=settings["batch_size"],
+            apply_ctf=settings["apply_ctf"],
+            downsample=settings["downsample"],
             device=device,
             max_positions=max_positions,
             n_repeats=n_repeats,
             delta_steps_pixels=delta_steps,
-            seed=seed,
+            seed=settings["seed"],
         )
         results.append(result)
 
     report_path = output_directory / "score_calibration.json"
     with open(report_path, "w") as f:
         json.dump(
-            {"model_checkpoint": str(model_checkpoint), "series": results}, f, indent=2
+            {
+                "config_file": str(config_file),
+                "model_checkpoint": str(model_checkpoint),
+                # record the resolved settings so a report is self-describing
+                "settings": {
+                    **settings,
+                    "data_directory": str(settings["data_directory"]),
+                },
+                "max_positions": max_positions,
+                "n_repeats": n_repeats,
+                "series": results,
+            },
+            f,
+            indent=2,
         )
 
     plot_path = output_directory / "score_calibration.png"
